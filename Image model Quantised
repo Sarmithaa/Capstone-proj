@@ -1,0 +1,86 @@
+import torch
+import time
+import psutil
+import tracemalloc
+from PIL import Image
+from transformers import VisionEncoderDecoderModel, ViTImageProcessor, BertTokenizer, GenerationConfig
+import requests
+import nltk
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from nltk.tokenize import word_tokenize
+
+# Download punkt tokenizer
+nltk.download('punkt', force=True)
+
+# Load models
+mode = "findings"
+model_id = f"IAMJB/chexpert-mimic-cxr-{mode}-baseline"
+
+# Generation arguments
+generation_args = {
+    "bos_token_id": None,
+    "eos_token_id": None,
+    "pad_token_id": None,
+    "num_return_sequences": 1,
+    "max_length": 128,
+    "use_cache": True,
+    "beam_width": 2,
+}
+
+# Load original model
+model = VisionEncoderDecoderModel.from_pretrained(model_id).eval()
+tokenizer = BertTokenizer.from_pretrained(model_id)
+image_processor = ViTImageProcessor.from_pretrained(model_id)
+generation_args["bos_token_id"] = model.config.bos_token_id
+generation_args["eos_token_id"] = model.config.eos_token_id
+generation_args["pad_token_id"] = model.config.pad_token_id
+
+# Load quantized model
+quant_model = torch.quantization.quantize_dynamic(
+    model, {torch.nn.Linear}, dtype=torch.qint8
+).eval()
+
+# Load image
+url = "https://huggingface.co/IAMJB/interpret-cxr-impression-baseline/resolve/main/effusions-bibasal.jpg"
+image = Image.open(requests.get(url, stream=True).raw)
+pixel_values = image_processor(image, return_tensors="pt").pixel_values
+
+# Function to evaluate model
+def evaluate_model(model, label="Original"):
+    with torch.no_grad():
+        # Start tracking memory usage
+        tracemalloc.start()
+        start_mem = psutil.Process().memory_info().rss / (1024 ** 2)  # Memory in MB
+        start_time = time.time()
+
+        generated_ids = model.generate(
+            pixel_values,
+            generation_config=GenerationConfig(
+                **{**generation_args, "decoder_start_token_id": tokenizer.cls_token_id}
+            )
+        )
+
+        end_time = time.time()
+
+        # Memory after inference
+        end_mem = psutil.Process().memory_info().rss / (1024 ** 2)
+        current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        # Compute metrics
+        text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        latency = end_time - start_time
+        throughput = 1 / latency
+        memory_mb = end_mem - start_mem
+
+        print(f"\n--- {label} Model ---")
+        print(f"Generated Text: {text}")
+        print(f"Latency: {latency:.4f} seconds")
+        print(f"Throughput: {throughput:.2f} images/sec")
+        print(f"Memory Usage: {memory_mb:.2f} MB")
+
+        return text, latency, throughput, memory_mb
+
+# Run evaluations
+orig_text, orig_latency, orig_throughput, orig_memory = evaluate_model(model, "Original")
+quant_text, quant_latency, quant_throughput, quant_memory = evaluate_model(quant_model, "Quantized")
