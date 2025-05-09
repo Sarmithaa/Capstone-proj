@@ -1,0 +1,59 @@
+import time
+import torch
+import torch.nn.functional as F
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+# Load model and tokenizer
+model_name = "shanover/symps_disease_bert_v3_c41"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSequenceClassification.from_pretrained(model_name)
+model.eval()
+
+# Input: symptom description
+symptoms = "I have a runny nose, sneezing, and sore throat."
+
+# Tokenize input
+inputs = tokenizer(symptoms, return_tensors="pt")
+
+# Ensure that inputs are moved to the same device (CPU or GPU)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+inputs = {key: value.to(device) for key, value in inputs.items()}
+model = model.to(device)
+
+# Measure unoptimized inference time (Before quantization)
+start = time.time()
+with torch.no_grad():
+    outputs = model(**inputs)
+    logits = outputs.logits
+    probs = F.softmax(logits, dim=1)
+    predicted_class = torch.argmax(probs, dim=1).item()
+end = time.time()
+
+unoptimized_latency = end - start
+print(f"Unoptimized Model Latency (single input): {unoptimized_latency:.4f} seconds")
+print(f"Predicted Class (Unoptimized): {predicted_class}")
+
+# Apply quantization (Dynamic Quantization)
+quantized_model = torch.quantization.quantize_dynamic(
+    model,  # Model to quantize
+    {torch.nn.Linear},  # Layers to apply quantization (only Linear layers)
+    dtype=torch.qint8
+)
+
+# Measure inference time after quantization
+start = time.time()
+with torch.no_grad():
+    outputs = quantized_model(**inputs)
+    logits = outputs.logits
+    probs = F.softmax(logits, dim=1)
+    predicted_class = torch.argmax(probs, dim=1).item()
+end = time.time()
+
+quantized_latency = end - start
+print(f"Quantized Model Latency (single input): {quantized_latency:.4f} seconds")
+print(f"Predicted Class (Quantized): {predicted_class}")
+
+# Comparing the latency
+print(f"\nLatency Comparison:")
+print(f"Unoptimized Model Latency: {unoptimized_latency:.4f} seconds")
+print(f"Quantized Model Latency: {quantized_latency:.4f} seconds")
