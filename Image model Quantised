@@ -1,3 +1,4 @@
+!pip install transformers torch torchvision pillow psutil
 import torch
 import time
 import psutil
